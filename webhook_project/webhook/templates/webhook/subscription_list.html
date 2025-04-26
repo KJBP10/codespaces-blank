@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Subscriptions</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f9f9f9;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 2px solid #333;
+            padding-bottom: 5px;
+        }
+        a {
+            text-decoration: none;
+            color: #4CAF50;
+            margin-bottom: 10px;
+            display: inline-block;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            background-color: #fff;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border: 1px solid #ddd;
+        }
+        th {
+            background-color: #f2f2f2;
+            color: #333;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        tr:hover {
+            background-color: #f0f0f0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Subscriptions</h1>
+    <a href="{% url 'subscription_create' %}">Create New Subscription</a>
+    <table>
+        <tr>
+            <th>ID</th>
+            <th>Callback URL</th>
+            <th>Event Types</th>
+            <th>Actions</th>
+        </tr>
+        {% for sub in subscriptions %}
+        <tr>
+            <td>{{ sub.id }}</td>
+            <td>{{ sub.callback_url }}</td>
+            <td>{{ sub.event_types|join:", " }}</td>
+            <td>
+                <a href="{% url 'subscription_update' pk=sub.id %}">View Logs</a>
+            </td>
+        </tr>
+        {% empty %}
+        <tr>
+            <td colspan="4">No subscriptions available.</td>
+        </tr>
+        {% endfor %}
+    </table>
+</body>
+</html>

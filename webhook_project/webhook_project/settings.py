@@ -78,13 +78,29 @@ WSGI_APPLICATION = "webhook_project.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
-    }
-}
+import os
+from urllib.parse import urlparse
 
+DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///db.sqlite3')
+if DATABASE_URL.startswith('postgres'):
+    db_info = urlparse(DATABASE_URL)
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': db_info.path[1:],
+            'USER': db_info.username,
+            'PASSWORD': db_info.password,
+            'HOST': db_info.hostname,
+            'PORT': db_info.port,
+        }
+    }
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': DATABASE_URL,
+        }
+    }
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
@@ -181,14 +197,14 @@ LOGGING = {
     },
 }
 
-# webhook_project/settings.py
+from celery.schedules import crontab
+
 CELERY_BEAT_SCHEDULE = {
     'cleanup-old-logs': {
         'task': 'webhook.tasks.cleanup_old_logs',
-        'schedule': 60.0,
+        'schedule': 86400.0,  # Run daily
     },
 }
-
 # Redis Cache Configuration
 CACHES = {
     'default': {
@@ -199,3 +215,6 @@ CACHES = {
         }
     }
 }
+
+# webhook_project/settings.py
+# APPEND_SLASH = True  # Ensure this is present or defaulted to True

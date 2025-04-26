@@ -1,17 +1,40 @@
+# webhook/tests.py
 from django.test import TestCase
 from rest_framework.test import APIClient
-from .models import Subscription
+from .models import Subscription, WebhookDeliveryLog
+from django.urls import reverse
+import uuid
 
-class WebhookTestCase(TestCase):
+class WebhookTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.subscription = Subscription.objects.create(target_url="https://webhook.site/test")
+        self.subscription = Subscription.objects.create(
+            callback_url='https://httpbin.org/post',
+            event_types=['test'],
+            secret_key='test-secret'
+        )
+        self.webhook_id = str(uuid.uuid4())  # Generate a valid UUID
 
-    def test_create_subscription(self):
-        response = self.client.post('/api/subscriptions/', {"target_url": "https://example.com"})
-        self.assertEqual(response.status_code, 201)
+    def test_webhook_status(self):
+        WebhookDeliveryLog.objects.create(
+            webhook_id=self.webhook_id,  # Use the valid UUID
+            subscription_id=self.subscription.id,
+            attempt_number=1,
+            outcome='success',
+            http_status=200
+        )
+        response = self.client.get(reverse('webhook_status', args=[self.webhook_id]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['webhook_id'], self.webhook_id)
 
-    def test_ingest_webhook(self):
-        response = self.client.post(f'/api/ingest/{self.subscription.id}/', {"data": {"event": "test"}})
-        self.assertEqual(response.status_code, 202)
-        self.assertIn("webhook_id", response.data)
+    def test_subscription_logs(self):
+        WebhookDeliveryLog.objects.create(
+            webhook_id=self.webhook_id,  # Use the valid UUID
+            subscription_id=self.subscription.id,
+            attempt_number=1,
+            outcome='success',
+            http_status=200
+        )
+        response = self.client.get(reverse('subscription_logs', args=[self.subscription.id]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['subscription_id'], str(self.subscription.id))

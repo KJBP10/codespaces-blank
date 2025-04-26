@@ -1,4 +1,31 @@
+
 services:
+  db:
+    image: postgres:14
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=webhook_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - webhook-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d webhook_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    networks:
+      - webhook-network
+
   web:
     build: .
     command: python manage.py runserver 0.0.0.0:8000
@@ -7,34 +34,53 @@ services:
     volumes:
       - .:/app
     depends_on:
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/webhook_db
+      - DJANGO_SECRET_KEY=your-secret-key
     networks:
       - webhook-network
-  redis:
-    image: redis:7
-    ports:
-      - "6379:6379"
-    networks:
-      - webhook-network
+
   worker:
     build: .
     command: celery -A webhook_project worker --loglevel=info --concurrency=1
     volumes:
       - .:/app
     depends_on:
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql://user:password@db:5432/webhook_db
     networks:
       - webhook-network
+
   beat:
     build: .
     command: celery -A webhook_project beat --loglevel=info --schedule=/tmp/celerybeat-schedule
     volumes:
       - .:/app
     depends_on:
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql://user:password@db:5432/webhook_db
     networks:
       - webhook-network
 
 networks:
   webhook-network:
     driver: bridge
+
+volumes:
+  postgres_data:

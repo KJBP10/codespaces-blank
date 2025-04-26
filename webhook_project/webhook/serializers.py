@@ -4,7 +4,7 @@ from .models import Subscription, WebhookDeliveryLog
 class SubscriptionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Subscription
-        fields = ['id', 'target_url', 'event_types', 'created_at']
+        fields = ['id', 'callback_url', 'event_types', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 class WebhookPayloadSerializer(serializers.Serializer):

@@ -1,118 +1,97 @@
-from celery import Celery
-from celery.exceptions import Retry
+from celery import Celery, shared_task
 from django.utils import timezone
 import requests
 import json
 import logging
 from webhook.models import Subscription, WebhookDeliveryLog
-from redis import Redis, RedisError
+from django.core.cache import cache
+from datetime import timedelta
+import hmac
+import hashlib
 
 app = Celery('webhook_project')
 app.config_from_object('django.conf:settings', namespace='CELERY')
 
 logger = logging.getLogger(__name__)
-redis = Redis(host='redis', port=6379, db=0)
 
-@app.task(bind=True, max_retries=6)
-def deliver_webhook(self, webhook_id, subscription_id, payload, event_type, task_id=None):
-    try:
-        # Use a lock key that includes attempt number to allow retries
-        task_lock_key = f"task_lock:{webhook_id}:{self.request.retries + 1}"
-        if not redis.set(task_lock_key, "1", ex=3600, nx=True):
-            logger.info(f"Task already being processed for webhook_id: {webhook_id}, attempt: {self.request.retries + 1}")
-            return
+@shared_task(bind=True, max_retries=5)
+def deliver_webhook(self, webhook_id, subscription_id, payload, event_type):
+    # Cache subscription details
+    cache_key = f"subscription:{subscription_id}"
+    subscription_data = cache.get(cache_key)
 
-        logger.info(f"Processing deliver_webhook task for webhook_id: {webhook_id}, subscription_id: {subscription_id}")
+    if not subscription_data:
         subscription = Subscription.objects.get(id=subscription_id)
-        attempt_number = self.request.retries + 1
+        subscription_data = {
+            'callback_url': subscription.callback_url,
+            'event_types': subscription.event_types,
+            'secret_key': subscription.secret_key
+        }
+        cache.set(cache_key, subscription_data, timeout=3600)  # Cache for 1 hour
+        logger.info(f"Cached subscription {subscription_id}")
+
+    attempt_number = self.request.retries + 1
+    delivery_log = WebhookDeliveryLog(
+        webhook_id=webhook_id,
+        subscription_id=subscription_id,
+        attempt_number=attempt_number,
+        created_at=timezone.now()
+    )
+
+    try:
+        logger.info(f"Delivering webhook {webhook_id} to {subscription_data['callback_url']}, attempt {attempt_number}")
 
         headers = {
-            "X-Event-Type": event_type or "",
-            "X-Webhook-ID": webhook_id,
-            "X-Attempt-Number": str(attempt_number),
+            'X-Event-Type': event_type,
+            'X-Webhook-ID': webhook_id,
+            'Content-Type': 'application/json',
         }
+        if subscription_data['secret_key']:
+            payload_bytes = payload.encode('utf-8')
+            signature = hmac.new(
+                subscription_data['secret_key'].encode('utf-8'),
+                payload_bytes,
+                hashlib.sha256
+            ).hexdigest()
+            headers['X-Hub-Signature-256'] = f'sha256={signature}'
 
-        logger.info(f"Attempt {attempt_number}: Sending POST to {subscription.callback_url} with headers: {headers}")
-        response = requests.post(subscription.callback_url, data=payload, headers=headers, timeout=10)
-        logger.info(f"Received response: status={response.status_code}, body={response.text[:500]}...")
-
-        outcome = "success" if response.status_code == 200 else "failed_attempt"
-        WebhookDeliveryLog.objects.create(
-            webhook_id=webhook_id,
-            subscription=subscription,
-            attempt_number=attempt_number,
-            outcome=outcome,
-            http_status=response.status_code,
-            error_details=None if outcome == "success" else f"HTTP {response.status_code}: {response.text[:500]}",
+        response = requests.post(
+            subscription_data['callback_url'],
+            data=payload,
+            headers=headers,
+            timeout=10
         )
 
-        if response.status_code != 200:
-            retry_seconds = [10, 30, 60, 300, 900][self.request.retries]
-            logger.info(f"Retrying task in {retry_seconds} seconds (attempt {attempt_number}/6)")
-            redis.delete(task_lock_key)  # Release the lock before retrying
-            raise self.retry(countdown=retry_seconds)
+        delivery_log.http_status = response.status_code
+        delivery_log.outcome = 'success' if 200 <= response.status_code < 300 else 'failed_attempt'
+        delivery_log.error_details = response.text if response.status_code >= 400 else None
+        delivery_log.save()
 
-        logger.info(f"Webhook delivery succeeded for webhook_id: {webhook_id}")
-        redis.delete(task_lock_key)  # Release the lock on success
-    except requests.RequestException as e:
-        logger.error(f"Request failed for webhook_id: {webhook_id}: {str(e)}")
-        subscription = Subscription.objects.get(id=subscription_id)
-        WebhookDeliveryLog.objects.create(
-            webhook_id=webhook_id,
-            subscription=subscription,
-            attempt_number=attempt_number,
-            outcome="failed_attempt",
-            http_status=None,
-            error_details=str(e),
-        )
-        if self.request.retries < 5:  # Allow 6 total attempts (0-5 retries)
-            retry_seconds = [10, 30, 60, 300, 900][self.request.retries]
-            logger.info(f"Retrying task in {retry_seconds} seconds (attempt {attempt_number}/6)")
-            redis.delete(task_lock_key)  # Release the lock before retrying
-            raise self.retry(countdown=retry_seconds)
-        else:
-            logger.error(f"Max retries exceeded for webhook_id: {webhook_id}")
-            WebhookDeliveryLog.objects.create(
-                webhook_id=webhook_id,
-                subscription=subscription,
-                attempt_number=attempt_number,
-                outcome="failure",
-                http_status=None,
-                error_details="Max retries exceeded",
-            )
-    except MaxRetriesExceededError:
-        logger.error(f"Max retries exceeded for webhook_id: {webhook_id}")
-        subscription = Subscription.objects.get(id=subscription_id)
-        WebhookDeliveryLog.objects.create(
-            webhook_id=webhook_id,
-            subscription=subscription,
-            attempt_number=attempt_number,
-            outcome="failure",
-            http_status=None,
-            error_details="Max retries exceeded",
-        )
+        if delivery_log.outcome != 'success':
+            raise Exception(f"Failed with status {response.status_code}: {response.text}")
+
+        logger.info(f"Webhook {webhook_id} delivered successfully")
+
     except Exception as e:
-        logger.error(f"Unexpected error for webhook_id: {webhook_id}: {str(e)}")
-        subscription = Subscription.objects.get(id=subscription_id)
-        WebhookDeliveryLog.objects.create(
-            webhook_id=webhook_id,
-            subscription=subscription,
-            attempt_number=attempt_number,
-            outcome="failure",
-            http_status=None,
-            error_details=str(e),
-        )
-        raise
-    finally:
-        # Ensure the lock is released in all cases
-        redis.delete(task_lock_key)
+        delivery_log.outcome = 'failure' if attempt_number == self.max_retries + 1 else 'failed_attempt'
+        delivery_log.error_details = str(e)
+        if 'response' in locals():
+            delivery_log.http_status = response.status_code
+        else:
+            delivery_log.http_status = 503  # Service unavailable for network/timeout errors
+        delivery_log.save()
 
-@app.task
+        if attempt_number <= self.max_retries:
+            delays = [10, 30, 60, 300, 900]
+            delay = delays[attempt_number - 1] if attempt_number - 1 < len(delays) else 900
+            logger.warning(f"Retrying webhook {webhook_id} (attempt {attempt_number + 1}/{self.max_retries + 1}) after {delay}s")
+            raise self.retry(countdown=delay)
+        else:
+            logger.error(f"All retries failed for webhook {webhook_id}: {str(e)}")
+            raise Exception(f"All retries failed for webhook {webhook_id}: {str(e)}")
+
+@shared_task
 def cleanup_old_logs():
-    """
-    Delete webhook delivery logs older than 7 days.
-    """
-    logger.info("Running cleanup_old_logs task")
-    threshold = timezone.now() - timezone.timedelta(days=7)
-    deleted_count, _ = WebhookDeliveryLog.objects.filter(created_at__lt=threshold).delete()
+    cutoff = timezone.now() - timedelta(hours=72)
+    deleted_count, _ = WebhookDeliveryLog.objects.filter(created_at__lt=cutoff).delete()
     logger.info(f"Deleted {deleted_count} old webhook delivery logs")
