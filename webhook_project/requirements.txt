@@ -1,0 +1,8 @@
+Django>=4.0
+djangorestframework
+celery>=5.0.0
+redis==5.0.8
+requests
+gunicorn
+python-dotenv
+django-redis>=5.4.0
