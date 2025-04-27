@@ -1,5 +1,4 @@
-
-
+[ec2-user@ip-172-31-2-204 webhook_project]$ cat docker-compose.yml
 services:
   db:
     image: postgres:14
@@ -46,7 +45,8 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - REDIS_URL=redis://redis:6379/1
       - DEBUG=True
-      - ALLOWED_HOSTS=localhost,127.0.0.1
+    env_file:
+      - .env  # Load the .env file
     networks:
       - webhook-network
 
@@ -92,3 +92,4 @@ networks:
 
 volumes:
   postgres_data:
+[ec2-user@ip-172-31-2-204 webhook_project]$ 
